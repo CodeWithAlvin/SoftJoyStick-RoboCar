@@ -1,0 +1,237 @@
+<!DOCTYPE html>
+<html lang="en">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Joystick Control with Lane Adjustment</title>
+    <style>
+        body {
+            font-family: Arial, sans-serif;
+            text-align: center;
+            margin: 0;
+            padding: 0;
+            display: flex;
+            flex-direction: column;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+            background-color: #f0f0f0;
+        }
+        canvas {
+            border: 1px solid #ccc;
+            background-color: #fff;
+            touch-action: none;
+            margin-bottom: 20px;
+        }
+        .scaling-control {
+            width: 300px;
+            margin: 10px 0;
+            padding: 10px;
+            background-color: #fff;
+            border-radius: 5px;
+            box-shadow: 0 2px 5px rgba(0,0,0,0.1);
+        }
+        .scaling-control label {
+            display: block;
+            margin-bottom: 5px;
+            color: #333;
+        }
+        .scaling-control input {
+            width: 80%;
+            margin-right: 10px;
+        }
+        .scaling-control span {
+            color: #007BFF;
+            font-weight: bold;
+        }
+    </style>
+</head>
+<body>
+    <h1>Joystick Car Control</h1>
+    <canvas id="joystick" width="300" height="300"></canvas>
+    <div class="scaling-control">
+        <label for="pwmScale">PWM Scaling Factor (%)</label>
+        <input type="range" id="pwmScale" min="0" max="100" value="100">
+        <span id="scaleValue">100%</span>
+    </div>
+    <p id="output">Direction: STOP, PWM Left: 0, PWM Right: 0</p>
+
+    <script>
+        const canvas = document.getElementById('joystick');
+        const ctx = canvas.getContext('2d');
+        const centerX = canvas.width / 2;
+        const centerY = canvas.height / 2;
+        const radius = 100;
+        const knobRadius = 20;
+        const pwmScaleSlider = document.getElementById('pwmScale');
+        const scaleValueDisplay = document.getElementById('scaleValue');
+        const MAX_PWM = 255;
+
+        let knobX = centerX;
+        let knobY = centerY;
+        let isDragging = false;
+        let lastSendTime = 0;
+        const debounceInterval = 100;
+
+        function drawJoystick() {
+            ctx.clearRect(0, 0, canvas.width, canvas.height);
+
+            ctx.beginPath();
+            ctx.arc(centerX, centerY, radius, 0, 2 * Math.PI);
+            ctx.strokeStyle = '#aaa';
+            ctx.lineWidth = 2;
+            ctx.stroke();
+
+            ctx.beginPath();
+            ctx.arc(knobX, knobY, knobRadius, 0, 2 * Math.PI);
+            ctx.fillStyle = '#007BFF';
+            ctx.fill();
+        }
+
+        function calculateDirectionAndPWM() {
+            const dx = knobX - centerX;
+            const dy = knobY - centerY;
+            const distance = Math.sqrt(dx * dx + dy * dy);
+            const angle = Math.atan2(-dy, dx);
+
+            // Calculate base PWM and ensure it doesn't exceed MAX_PWM
+            let pwm = Math.min(MAX_PWM, Math.round((distance / radius) * MAX_PWM));
+            
+            // Apply scaling factor after ensuring MAX_PWM limit
+            const scalingFactor = pwmScaleSlider.value / 100;
+            pwm = Math.round(pwm * scalingFactor);
+
+            let direction;
+            if (distance < 10) {
+                direction = 'STOP';
+            } else if (angle >= -Math.PI / 4 && angle < Math.PI / 4) {
+                direction = 'D';
+            } else if (angle >= Math.PI / 4 && angle < 3 * Math.PI / 4) {
+                direction = 'W';
+            } else if (angle >= -3 * Math.PI / 4 && angle < -Math.PI / 4) {
+                direction = 'S';
+            } else {
+                direction = 'A';
+            }
+
+            let dutyA, dutyB;
+            if (direction === 'W' || direction === 'S') {
+                const offsetFactor = dx / radius;
+                dutyB = Math.min(MAX_PWM, Math.max(0, pwm - pwm * offsetFactor));
+                dutyA = Math.min(MAX_PWM, Math.max(0, pwm + pwm * offsetFactor));
+            } else {
+                dutyA = direction === 'A' || direction === 'D' ? 
+                    Math.min(MAX_PWM, pwm) : 
+                    Math.min(MAX_PWM, Math.round(pwm * Math.abs(Math.sin(angle))));
+                dutyB = direction === 'A' || direction === 'D' ? 
+                    Math.min(MAX_PWM, pwm) : 
+                    Math.min(MAX_PWM, Math.round(pwm * Math.abs(Math.cos(angle))));
+            }
+
+            return { 
+                direction, 
+                dutyA: Math.round(Math.min(MAX_PWM, dutyA)), 
+                dutyB: Math.round(Math.min(MAX_PWM, dutyB))
+            };
+        }
+
+        function sendData() {
+            const now = Date.now();
+            if (now - lastSendTime < debounceInterval) return;
+
+            lastSendTime = now;
+
+            const { direction, dutyA, dutyB } = calculateDirectionAndPWM();
+            document.getElementById('output').innerText = `Direction: ${direction}, PWM Left: ${dutyA}, PWM Right: ${dutyB}`;
+
+            fetch(`/move?direction=${direction}&dutyA=${dutyA}&dutyB=${dutyB}`)
+                .then(response => response.text())
+                .then(data => console.log(data));
+        }
+
+        function stopCar() {
+            fetch('/move?direction=STOP&dutyA=0&dutyB=0')
+                .then(response => response.text())
+                .then(data => console.log(data));
+
+            document.getElementById('output').innerText = 'Direction: STOP, PWM Left: 0, PWM Right: 0';
+        }
+
+        function startDrag(x, y) {
+            const dx = x - knobX;
+            const dy = y - knobY;
+
+            if (Math.sqrt(dx * dx + dy * dy) <= knobRadius) {
+                isDragging = true;
+            }
+        }
+
+        function moveJoystick(x, y) {
+            if (!isDragging) return;
+
+            const dx = x - centerX;
+            const dy = y - centerY;
+            const distance = Math.sqrt(dx * dx + dy * dy);
+
+            if (distance <= radius) {
+                knobX = x;
+                knobY = y;
+            } else {
+                knobX = centerX + (dx / distance) * radius;
+                knobY = centerY + (dy / distance) * radius;
+            }
+
+            drawJoystick();
+            sendData();
+        }
+
+        function endDrag() {
+            isDragging = false;
+            knobX = centerX;
+            knobY = centerY;
+            drawJoystick();
+            stopCar();
+        }
+
+        // Mouse Events
+        canvas.addEventListener('mousedown', (e) => {
+            const rect = canvas.getBoundingClientRect();
+            startDrag(e.clientX - rect.left, e.clientY - rect.top);
+        });
+
+        canvas.addEventListener('mousemove', (e) => {
+            const rect = canvas.getBoundingClientRect();
+            moveJoystick(e.clientX - rect.left, e.clientY - rect.top);
+        });
+
+        canvas.addEventListener('mouseup', endDrag);
+        canvas.addEventListener('mouseleave', endDrag);
+
+        // Touch Events
+        canvas.addEventListener('touchstart', (e) => {
+            const rect = canvas.getBoundingClientRect();
+            const touch = e.touches[0];
+            startDrag(touch.clientX - rect.left, touch.clientY - rect.top);
+        });
+
+        canvas.addEventListener('touchmove', (e) => {
+            const rect = canvas.getBoundingClientRect();
+            const touch = e.touches[0];
+            moveJoystick(touch.clientX - rect.left, touch.clientY - rect.top);
+        });
+
+        canvas.addEventListener('touchend', endDrag);
+        canvas.addEventListener('touchcancel', endDrag);
+
+        // PWM Scale Slider Event
+        pwmScaleSlider.addEventListener('input', function() {
+            scaleValueDisplay.textContent = this.value + '%';
+            if (isDragging) {
+                sendData();
+            }
+        });
+
+        drawJoystick();
+    </script>
+</body>
+</html>
